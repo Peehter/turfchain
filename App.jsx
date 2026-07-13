@@ -3,7 +3,8 @@ import { supabase } from "./supabaseClient";
 import {
   Home, MapPin, Search, Plus, ShieldCheck, ChevronLeft, X,
   Building2, Warehouse, Trees, Landmark, Clock, Hash, Sun, Moon,
-  FileCheck2, Upload, Check, XCircle, ClipboardList, FileText, LogOut, LogIn
+  FileCheck2, Upload, Check, XCircle, ClipboardList, FileText, LogOut, LogIn,
+  MessageCircle, Send, Phone
 } from "lucide-react";
 
 const TYPE_ICON = { Apartment: Building2, House: Home, Land: Trees, Duplex: Warehouse, Commercial: Landmark };
@@ -35,6 +36,364 @@ export default function App() {
   const [activeId, setActiveId] = useState(null);
   const [query, setQuery] = useState("");
   const [typeFilter, setTypeFilter] = useState("All");
+  const [purposeFilter, setPurposeFilter] = useState("All");
+  const [theme, setTheme] = useState("dark");
+  const [toast, setToast] = useState("");
+  const [authMode, setAuthMode] = useState("signin");
+  const [authEmail, setAuthEmail] = useState("");
+  const [authPassword, setAuthPassword] = useState("");
+  const [authError, setAuthError] = useState("");
+  const [activeChat, setActiveChat] = useState(null); // { listingId, buyerId, listingTitle, otherLabel }
+  const [threads, setThreads] = useState([]);
+
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data }) => setSession(data.session));
+    const { data: sub } = supabase.auth.onAuthStateChange((_event, s) => setSession(s));
+    return () => sub.subscription.unsubscribe();
+  }, []);
+
+  useEffect(() => {
+    if (!session) { setProfile(null); return; }
+    (async () => {
+      const { data } = await supabase.from("profiles").select("*").eq("id", session.user.id).single();
+      setProfile(data);
+    })();
+  }, [session]);
+
+  const fetchListings = useCallback(async () => {
+    const { data, error } = await supabase.from("listings").select("*").order("featured", { ascending: false }).order("created_at", { ascending: false });
+    if (!error) setListings(data || []);
+    setLoaded(true);
+  }, []);
+
+  useEffect(() => { fetchListings(); }, [fetchListings]);
+
+  const fetchThreads = useCallback(async () => {
+    if (!session) { setThreads([]); return; }
+    const { data, error } = await supabase
+      .from("messages")
+      .select("*, listings(title, realtor_id)")
+      .or(`buyer_id.eq.${session.user.id},listing_id.in.(${listings.filter(l => l.realtor_id === session.user.id).map(l => l.id).join(",") || "00000000-0000-0000-0000-000000000000"})`)
+      .order("created_at", { ascending: true });
+    if (error) { console.log("thread fetch error", error); return; }
+    const grouped = {};
+    (data || []).forEach((m) => {
+      const key = m.listing_id + "|" + m.buyer_id;
+      if (!grouped[key]) grouped[key] = { listingId: m.listing_id, buyerId: m.buyer_id, listingTitle: m.listings?.title || "Listing", messages: [] };
+      grouped[key].messages.push(m);
+    });
+    setThreads(Object.values(grouped).sort((a, b) => {
+      const at = a.messages[a.messages.length - 1]?.created_at || "";
+      const bt = b.messages[b.messages.length - 1]?.created_at || "";
+      return bt.localeCompare(at);
+    }));
+  }, [session, listings]);
+
+  useEffect(() => { fetchThreads(); }, [fetchThreads]);
+
+  useEffect(() => {
+    if (!toast) return;
+    const t = setTimeout(() => setToast(""), 2800);
+    return () => clearTimeout(t);
+  }, [toast]);
+
+  const signUp = async (e) => {
+    e.preventDefault();
+    setAuthError("");
+    const { data, error } = await supabase.auth.signUp({ email: authEmail, password: authPassword });
+    if (error) { setAuthError(error.message); return; }
+    if (data.user) {
+      await supabase.from("profiles").insert({ id: data.user.id, role: "realtor", full_name: authEmail.split("@")[0] });
+    }
+    setToast("Account created — check your email to confirm, then sign in.");
+    setAuthMode("signin");
+  };
+
+  const signIn = async (e) => {
+    e.preventDefault();
+    setAuthError("");
+    const { error } = await supabase.auth.signInWithPassword({ email: authEmail, password: authPassword });
+    if (error) setAuthError(error.message);
+  };
+
+  const signOut = async () => { await supabase.auth.signOut(); setView("browse"); };
+
+  const addListing = async (form, file) => {
+    if (!session) { setToast("Sign in first to post a listing"); return; }
+    const { data: listing, error } = await supabase.from("listings").insert({
+      realtor_id: session.user.id,
+      title: form.title, location: form.location, price: Number(form.price) || 0,
+      type: form.type, purpose: form.purpose, price_interval: form.purpose === "Sale" ? "total" : form.priceInterval,
+      bedrooms: form.bedrooms ? Number(form.bedrooms) : null, description: form.description,
+      verification_status: file ? "pending" : "unverified",
+    }).select().single();
+
+    if (error) { setToast("Error: " + error.message); return; }
+
+    if (file) {
+      const hash = await hashFile(file);
+      const path = `${listing.id}/${file.name}`;
+      const { error: uploadErr } = await supabase.storage.from("documents").upload(path, file);
+      if (!uploadErr) {
+        await supabase.from("documents").insert({ listing_id: listing.id, file_path: path, sha256_hash: hash });
+        await supabase.from("listings").update({ hash }).eq("id", listing.id);
+      }
+    }
+    setToast(file ? "Listing submitted — pending verification review" : "Listing posted");
+    await fetchListings();
+    setView("browse");
+  };
+
+  const approve = async (id) => {
+    const { error } = await supabase.from("listings").update({ verified: true, verification_status: "verified" }).eq("id", id);
+    if (error) { setToast("Not authorized: " + error.message); return; }
+    setToast("Listing verified and stamped");
+    await fetchListings();
+  };
+
+  const reject = async (id) => {
+    const { error } = await supabase.from("listings").update({ verified: false, verification_status: "rejected" }).eq("id", id);
+    if (error) { setToast("Not authorized: " + error.message); return; }
+    setToast("Listing rejected");
+    await fetchListings();
+  };
+
+  const filtered = listings.filter((l) => {
+    const matchesQuery = query.trim() === "" || l.title.toLowerCase().includes(query.toLowerCase()) || l.location.toLowerCase().includes(query.toLowerCase());
+    const matchesType = typeFilter === "All" || l.type === typeFilter;
+    const matchesPurpose = purposeFilter === "All" || l.purpose === purposeFilter;
+    return matchesQuery && matchesType && matchesPurpose;
+  });
+
+  const active = listings.find((l) => l.id === activeId);
+  const isAdmin = profile && profile.role === "admin";
+
+  return (
+    <div className="tc-root" data-theme={theme}>
+      <style>{STYLES}</style>
+      <header className="header">
+        <div className="logo" onClick={() => setView("browse")}>
+          <div className="logo-mark">T</div>
+          <span className="logo-text">TurfChain</span>
+        </div>
+        <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+          {view !== "browse" && <button className="nav-btn" onClick={() => setView("browse")}><Home size={15} /> Browse</button>}
+          {isAdmin && <button className="nav-btn" onClick={() => setView("review")}><ClipboardList size={15} /> Review queue</button>}
+          {session ? (
+            <>
+              <button className="nav-btn" onClick={() => setView("messages")}><MessageCircle size={15} /> Messages{threads.length > 0 && <span className="nav-dot">{threads.length}</span>}</button>
+              <button className="nav-btn primary" onClick={() => setView("post")}><Plus size={15} /> Post a listing</button>
+              <button className="nav-btn" onClick={signOut}><LogOut size={15} /></button>
+            </>
+          ) : (
+            <button className="nav-btn primary" onClick={() => setView("auth")}><LogIn size={15} /> Sign in</button>
+          )}
+          <button className="icon-btn" onClick={() => setTheme(theme === "dark" ? "light" : "dark")}>
+            {theme === "dark" ? <Sun size={17} /> : <Moon size={17} />}
+          </button>
+        </div>
+      </header>
+
+      {view === "browse" && (
+        <>
+          <div className="hero">
+            <h1 className="display">Find property you can <span className="hl">actually trust</span>.</h1>
+            <p>Buy, rent, or lease — every verified listing on TurfChain is checked and fingerprinted against a real document.</p>
+            <div className="search-bar">
+              <input className="search-input" placeholder="Search by area..." value={query} onChange={(e) => setQuery(e.target.value)} />
+              <select className="type-select" value={purposeFilter} onChange={(e) => setPurposeFilter(e.target.value)}>
+                <option value="All">Buy or rent</option><option value="Sale">For Sale</option><option value="Rent">For Rent</option><option value="Lease">For Lease</option>
+              </select>
+              <select className="type-select" value={typeFilter} onChange={(e) => setTypeFilter(e.target.value)}>
+                <option>All</option><option>Apartment</option><option>House</option><option>Duplex</option><option>Land</option><option>Commercial</option>
+              </select>
+              <button className="search-go"><Search size={16} /></button>
+            </div>
+          </div>
+          <div className="section-label"><h2 className="display">Listings</h2><span className="count">{loaded ? `${filtered.length} available` : "loading…"}</span></div>
+          <div className="grid">
+            {loaded && filtered.length === 0 && <div className="empty">No listings yet — be the first to post one.</div>}
+            {filtered.map((l) => {
+              const Icon = TYPE_ICON[l.type] || Home;
+              return (
+                <div className="card" key={l.id} onClick={() => { setActiveId(l.id); setView("detail"); }}>
+                  <div className="card-media">
+                    {l.featured && <div className="ribbon">Featured</div>}
+                    <Icon size={40} color="var(--text-muted)" strokeWidth={1.4} />
+                    {l.verified && <div className="seal-mini"><ShieldCheck size={26} /></div>}
+                  </div>
+                  <div className="card-body">
+                    <div className="card-price">{formatPrice(l.price, l.purpose, l.price_interval)}</div>
+                    <div className="card-title">{l.title}</div>
+                    <div className="card-loc"><MapPin size={13} /> {l.location}</div>
+                    <div className="badge-row">
+                      <span className={`badge purpose-${l.purpose}`}>{PURPOSE_LABEL[l.purpose] || "For Sale"}</span>
+                      <span className="badge">{l.type}</span>
+                      {l.verification_status === "pending" && <span className="badge pending">Pending review</span>}
+                      {l.verification_status === "rejected" && <span className="badge rejected">Rejected</span>}
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </>
+      )}
+
+      {view === "detail" && active && (
+        <div className="detail-wrap">
+          <button className="back-btn" onClick={() => setView("browse")}><ChevronLeft size={16} /> Back to listings</button>
+          <div className="detail-media">
+            {React.createElement(TYPE_ICON[active.type] || Home, { size: 64, color: "var(--text-muted)", strokeWidth: 1.2 })}
+          </div>
+          <h1 className="detail-title">{active.title}</h1>
+          <div className="detail-price">{formatPrice(active.price, active.purpose, active.price_interval)}</div>
+          <div className="detail-loc"><MapPin size={15} /> {active.location}</div>
+          <div className="info-grid">
+            <div className="info-box"><div className="info-label">Purpose</div><div className="info-val">{PURPOSE_LABEL[active.purpose] || "For Sale"}</div></div>
+            <div className="info-box"><div className="info-label">Type</div><div className="info-val">{active.type}</div></div>
+            {active.bedrooms != null && <div className="info-box"><div className="info-label">Bedrooms</div><div className="info-val">{active.bedrooms}</div></div>}
+          </div>
+          <div className="divider" />
+          <p className="detail-desc">{active.description}</p>
+          <div className="verify-panel">
+            <div className="verify-row">
+              {active.verification_status === "verified" && <><ShieldCheck size={16} /> Document verified & fingerprinted</>}
+              {active.verification_status === "pending" && <><FileCheck2 size={16} /> Verification in progress</>}
+              {active.verification_status === "rejected" && <><XCircle size={16} /> Verification rejected</>}
+              {active.verification_status === "unverified" && <><FileCheck2 size={16} /> No document submitted</>}
+            </div>
+            {active.hash && <div className="verify-hash mono"><Hash size={12} style={{ display: "inline", marginRight: 4 }} />{active.hash}</div>}
+          </div>
+
+          {session && active.realtor_id !== session.user.id && (
+            <button
+              className="contact-btn"
+              onClick={() => { setActiveChat({ listingId: active.id, buyerId: session.user.id, listingTitle: active.title }); setView("chat"); }}
+            >
+              <Phone size={15} style={{ display: "inline", marginRight: 8, verticalAlign: "-2px" }} /> Contact realtor
+            </button>
+          )}
+          {!session && (
+            <button className="contact-btn" onClick={() => setView("auth")}>
+              <Phone size={15} style={{ display: "inline", marginRight: 8, verticalAlign: "-2px" }} /> Sign in to contact realtor
+            </button>
+          )}
+
+          {session && (active.realtor_id === session.user.id || isAdmin) && (
+            <button
+              className="nav-btn"
+              style={{ width: "100%", marginTop: 16, justifyContent: "center", borderColor: "var(--danger)", color: "var(--danger)" }}
+              onClick={async () => {
+                if (!window.confirm("Delete this listing? This can't be undone.")) return;
+                const { error } = await supabase.from("listings").delete().eq("id", active.id);
+                if (error) { setToast("Error: " + error.message); return; }
+                setToast("Listing deleted");
+                setView("browse");
+                fetchListings();
+              }}
+            >
+              Delete listing
+            </button>
+          )}
+        </div>
+      )}
+
+      {view === "post" && <PostForm onSubmit={addListing} onCancel={() => setView("browse")} />}
+
+      {view === "review" && isAdmin && (
+        <ReviewQueue listings={listings.filter((l) => l.verification_status === "pending")} onApprove={approve} onReject={reject} onBack={() => setView("browse")} />
+      )}
+
+      {view === "auth" && (
+        <div className="form-wrap">
+          <h1 className="form-title display">{authMode === "signin" ? "Sign in" : "Create account"}</h1>
+          <p className="form-sub">{authMode === "signin" ? "Realtors and admins sign in here to post and manage listings." : "Sign up to start posting listings on TurfChain."}</p>
+          <form onSubmit={authMode === "signin" ? signIn : signUp}>
+            <div className="field"><label>Email</label><input type="email" value={authEmail} onChange={(e) => setAuthEmail(e.target.value)} required /></div>
+            <div className="field"><label>Password</label><input type="password" value={authPassword} onChange={(e) => setAuthPassword(e.target.value)} required minLength={6} /></div>
+            {authError && <div className="upload-hint" style={{ color: "var(--danger)", marginBottom: 12 }}>{authError}</div>}
+            <button className="submit-btn" type="submit">{authMode === "signin" ? "Sign in" : "Sign up"}</button>
+          </form>
+          <button className="nav-btn" style={{ width: "100%", marginTop: 10, justifyContent: "center" }} onClick={() => setAuthMode(authMode === "signin" ? "signup" : "signin")}>
+            {authMode === "signin" ? "Need an account? Sign up" : "Already have an account? Sign in"}
+          </button>
+        </div>
+      )}
+
+      {view === "messages" && (
+        <MessagesList threads={threads} currentUserId={session?.user?.id} onOpen={(t) => {
+          const listing = listings.find((l) => l.id === t.listingId);
+          setActiveChat({ listingId: t.listingId, buyerId: t.buyerId, listingTitle: t.listingTitle });
+          setView("chat");
+        }} onBack={() => setView("browse")} />
+      )}
+
+      {view === "chat" && activeChat && session && (
+        <ChatView chat={activeChat} currentUserId={session.user.id} onBack={() => { setView("messages"); fetchThreads(); }} />
+      )}
+
+      {toast && <div className="toast"><Clock size={14} /> {toast}</div>}
+    </div>
+  );
+}
+
+function MessagesList({ threads, currentUserId, onOpen, onBack }) {
+  return (
+    <div className="review-wrap">
+      <button className="back-btn" onClick={onBack}><ChevronLeft size={16} /> Back to listings</button>
+      <h1 className="review-title display">Messages</h1>
+      {threads.length === 0 && <div className="empty" style={{ padding: "40px 0" }}>No conversations yet.</div>}
+      {threads.map((t) => {
+        const last = t.messages[t.messages.length - 1];
+        const isMine = last && last.sender_id === currentUserId;
+        return (
+          <div className="thread-item" key={t.listingId + "|" + t.buyerId} onClick={() => onOpen(t)}>
+            <div className="thread-avatar">{t.listingTitle.split(" ").map((w) => w[0]).slice(0, 2).join("").toUpperCase()}</div>
+            <div className="thread-body">
+              <div className="thread-top"><span className="thread-title">{t.listingTitle}</span></div>
+              <div className="thread-preview">{isMine ? "You: " : ""}{last?.body}</div>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function ChatView({ chat, currentUserId, onBack }) {
+  const [msgs, setMsgs] = useState([]);
+  const [text, setText] = useState("");
+  const [loaded, setLoaded] = useState(false);
+
+  useEffect(() => {
+    let channel;
+    (async () => {
+      const { data } = await supabase
+        .from("messages")
+        .select("*")
+        .eq("listing_id", chat.listingId)
+        .eq("buyer_id", chat.buyerId)
+        .order("created_at", { ascending: true });
+      setMsgs(data || []);
+      setLoaded(true);
+    })();
+
+    channel = supabase
+      .channel(`chat-${chat.listingId}-${chat.buyerId}`)
+      .on("postgres_changes", { event: "INSERT", schema: "public", table: "messages", filter: `listing_id=eq.${chat.listingId}` }, (payload) => {
+        if (payload.new.buyer_id !== chat.buyerId) return;
+        setMsgs((prev) => [...prev, payload.new]);
+      })
+      .subscribe();
+
+    return () => { if (channel) supabase.removeChannel(channel); };
+  }, [chat.listingId, chat.buyerId]);
+
+  const send = async (e) => {
+    e.preventDefault();
+    if (!text.trim()) return;
+    const body = text.tri  const [typeFilter, setTypeFilter] = useState("All");
   const [purposeFilter, setPurposeFilter] = useState("All");
   const [theme, setTheme] = useState("dark");
   const [toast, setToast] = useState("");
