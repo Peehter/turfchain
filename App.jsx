@@ -52,8 +52,10 @@ export default function App() {
   useEffect(() => {
     if (!session) { setProfile(null); return; }
     (async () => {
-      const { data } = await supabase.from("profiles").select("*").eq("id", session.user.id).single();
+      const { data, error } = await supabase.from("profiles").select("*").eq("id", session.user.id).single();
+      if (error) console.log("PROFILE FETCH ERROR:", error);
       setProfile(data);
+      window.__profileError = error ? error.message + " | " + error.code : "none";
     })();
   }, [session]);
 
@@ -151,7 +153,7 @@ export default function App() {
           <span className="logo-text">TurfChain</span>
         </div>
         <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-          <span style={{fontSize:10,color:"red"}}>DEBUG: session={session ? session.user.email : "none"} | profile={profile ? JSON.stringify(profile) : "null"}</span>
+          <span style={{fontSize:10,color:"red"}}>DEBUG: session={session ? session.user.email : "none"} | profile={profile ? JSON.stringify(profile) : "null"} | error={window.__profileError || "pending"}</span>
           {view !== "browse" && <button className="nav-btn" onClick={() => setView("browse")}><Home size={15} /> Browse</button>}
           {isAdmin && <button className="nav-btn" onClick={() => setView("review")}><ClipboardList size={15} /> Review queue</button>}
           {session ? (
