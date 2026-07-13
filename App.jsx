@@ -238,9 +238,24 @@ export default function App() {
             </div>
             {active.hash && <div className="verify-hash mono"><Hash size={12} style={{ display: "inline", marginRight: 4 }} />{active.hash}</div>}
           </div>
+          {session && (active.realtor_id === session.user.id || isAdmin) && (
+            <button
+              className="nav-btn"
+              style={{ width: "100%", marginTop: 16, justifyContent: "center", borderColor: "var(--danger)", color: "var(--danger)" }}
+              onClick={async () => {
+                if (!window.confirm("Delete this listing? This can't be undone.")) return;
+                const { error } = await supabase.from("listings").delete().eq("id", active.id);
+                if (error) { setToast("Error: " + error.message); return; }
+                setToast("Listing deleted");
+                setView("browse");
+                fetchListings();
+              }}
+            >
+              Delete listing
+            </button>
+          )}
         </div>
       )}
-
       {view === "post" && <PostForm onSubmit={addListing} onCancel={() => setView("browse")} />}
 
       {view === "review" && isAdmin && (
