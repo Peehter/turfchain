@@ -11,7 +11,10 @@ const TYPE_ICON = { Apartment: Building2, House: Home, Land: Trees, Duplex: Ware
 const PURPOSE_LABEL = { Sale: "For Sale", Rent: "For Rent", Lease: "For Lease" };
 
 function formatPrice(n, purpose, interval) {
-  const base = n >= 1000000 ? "₦" + (n / 1000000).toFixed(n % 1000000 === 0 ? 0 : 1) + "M" : "₦" + Number(n).toLocaleString();
+  let base;
+  if (n >= 1000000000) base = "₦" + (n / 1000000000).toFixed(n % 1000000000 === 0 ? 0 : 2) + "B";
+  else if (n >= 1000000) base = "₦" + (n / 1000000).toFixed(n % 1000000 === 0 ? 0 : 1) + "M";
+  else base = "₦" + Number(n).toLocaleString();
   if (purpose === "Rent" || purpose === "Lease") {
     const suffix = interval === "month" ? "/mo" : interval === "year" ? "/yr" : "";
     return base + suffix;
@@ -266,6 +269,7 @@ export default function App() {
             {active.hash && <div className="verify-hash mono"><Hash size={12} style={{ display: "inline", marginRight: 4 }} />{active.hash}</div>}
           </div>
 
+          <div style={{fontSize:10,color:"red"}}>DEBUG: my_id={session?.user?.id} | listing_realtor_id={active.realtor_id} | match={session?.user?.id === active.realtor_id ? "SAME (mine)" : "DIFFERENT (not mine)"}</div>
           {session && active.realtor_id !== session.user.id && (
             <button
               className="contact-btn"
